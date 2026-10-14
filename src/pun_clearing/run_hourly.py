@@ -5,6 +5,7 @@ Usage (after `pip install -e .`):
     pun-clearing --path data --date 20100504 --quiet
     pun-clearing --path data --date 20100504 --hours 8 9 13
     pun-clearing --path data --date 20100504 --jobs 8      # 8 hours in parallel
+    pun-clearing --path data --date 20100504 --hours 9 --quiet --json
 
 This will:
   1. Read the GME XML files for the given date
@@ -18,14 +19,17 @@ Prerequisites:
 """
 
 import argparse
+import json
 import logging
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict
 
 from pun_clearing.conf import options
 from pun_clearing.dataio.gme_importer import GMEImporter
 from pun_clearing.model.data_classes import HourlyData
 from pun_clearing.model.pun_model import build_and_solve
+from pun_clearing.service import HourResult, summarize
 
 logger = logging.getLogger(__name__)
 
@@ -76,51 +80,37 @@ def solve_hours(hourly_data: dict[int, HourlyData], hours: list[int], solver_nam
     return results
 
 
-def print_report(date: str, results: dict[int, tuple[HourlyData, float]],
-                 real_prices: dict[int, dict[str, float]], zone_map: dict[str, int],
-                 wall_time: float) -> None:
+def print_report(date: str, results: list[HourResult], wall_time: float) -> None:
     print("\n" + "=" * 80)
-    print(f"  RESULTS SUMMARY — {date}")
+    print(f"  RESULTS SUMMARY - {date}")
     print("=" * 80)
     print(f"\n  {'Hour':>4}  {'PUN (Model)':>14}  {'PUN (Real)':>14}  "
-          f"{'Difference':>12}  {'Time (s)':>10}")
-    print(f"  {'-'*4}  {'-'*14}  {'-'*14}  {'-'*12}  {'-'*10}")
-
-    for hour in sorted(results):
-        data, elapsed = results[hour]
-        model_pun = data.pun_price
-        assert model_pun is not None
-        real_pun = real_prices.get(hour, {}).get('PUN')
-        if real_pun is not None:
-            print(f"  {hour:>4}  {model_pun:>14.6f}  {real_pun:>14.6f}  "
-                  f"{model_pun - real_pun:>12.6f}  {elapsed:>10.2f}")
-        else:
-            print(f"  {hour:>4}  {model_pun:>14.6f}  {'N/A':>14}  "
-                  f"{'N/A':>12}  {elapsed:>10.2f}")
+          f"{'Difference':>12}  {'Split':>5}  {'Time (s)':>10}")
+    print(f"  {'-'*4}  {'-'*14}  {'-'*14}  {'-'*12}  {'-'*5}  {'-'*10}")
+    for r in results:
+        real = f"{r.pun_real:>14.6f}" if r.pun_real is not None else f"{'N/A':>14}"
+        diff = f"{r.pun_difference:>12.6f}" if r.pun_difference is not None else f"{'N/A':>12}"
+        split = "yes" if r.market_split else "no"
+        print(f"  {r.hour:>4}  {r.pun_model:>14.6f}  {real}  {diff}  {split:>5}  "
+              f"{r.solve_time_s:>10.2f}")
+        if r.solver_status != "optimal":
+            print(f"        warning: solver status '{r.solver_status}' (not proven optimal)")
 
     if results:
-        total = sum(elapsed for _, elapsed in results.values())
+        total = sum(r.solve_time_s for r in results)
         print(f"\n  Total solve time: {total:.2f}s  (average per hour {total / len(results):.2f}s)")
         print(f"  Wall-clock time:  {wall_time:.2f}s")
 
-    # Zonal prices that differ from the published ones
-    print("\n  Zonal prices differing from GME by more than 0.01 €/MWh:")
-    print(f"  {'Hour':>4}  {'Zone':>6}  {'zeta (Model)':>12}  {'zeta (Real)':>12}  {'Diff':>10}")
-    print(f"  {'-'*4}  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*10}")
-    n_diff = 0
-    for hour in sorted(results):
-        data, _ = results[hour]
-        for zone_name, zone_id in sorted(zone_map.items()):
-            model_price = data.zonal_prices.get(zone_id)
-            real_price = real_prices.get(hour, {}).get(zone_name)
-            if model_price is None or real_price is None:
-                continue
-            if abs(model_price - real_price) > 0.01:
-                n_diff += 1
-                print(f"  {hour:>4}  {zone_name:>6}  {model_price:>12.6f}  "
-                      f"{real_price:>12.6f}  {model_price - real_price:>10.6f}")
-    if n_diff == 0:
-        print("  (none)")
+    split_hours = [r for r in results if r.market_split]
+    if split_hours:
+        print("\n  Zonal prices in hours with a market split:")
+        print(f"  {'Hour':>4}  {'Zone':>6}  {'Model':>12}  {'Real':>12}  {'Difference':>12}")
+        print(f"  {'-'*4}  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*12}")
+        for r in split_hours:
+            for z in r.zonal_prices:
+                real = f"{z.real:>12.6f}" if z.real is not None else f"{'N/A':>12}"
+                diff = f"{z.difference:>12.6f}" if z.difference is not None else f"{'N/A':>12}"
+                print(f"  {r.hour:>4}  {z.zone:>6}  {z.model:>12.6f}  {real}  {diff}")
 
 
 def main() -> None:
@@ -138,6 +128,8 @@ def main() -> None:
                         help='Number of hours solved in parallel (default: 1)')
     parser.add_argument('--quiet', action='store_true',
                         help='Suppress solver output')
+    parser.add_argument('--json', action='store_true',
+                        help='Print the results as JSON instead of a table')
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s',
@@ -155,11 +147,16 @@ def main() -> None:
 
     t0 = time.perf_counter()
     results = solve_hours(hourly_data, hours, args.solver,
-                          verbose=not args.quiet, jobs=max(1, args.jobs))
+                          verbose=not (args.quiet or args.json), jobs=max(1, args.jobs))
     wall_time = time.perf_counter() - t0
 
-    print_report(args.date, results, importer.get_real_prices(),
-                 importer.get_zone_name_to_id(), wall_time)
+    real_prices = importer.get_real_prices()
+    summaries = [summarize(args.date, data, real_prices.get(hour, {}), elapsed)
+                 for hour, (data, elapsed) in sorted(results.items())]
+    if args.json:
+        print(json.dumps([asdict(r) for r in summaries], indent=2))
+    else:
+        print_report(args.date, summaries, wall_time)
 
 
 if __name__ == "__main__":
