@@ -21,11 +21,15 @@ SOLVER_NAME = 'appsi_highs'
    'appsi_highs' requires: pip install highspy
    This is the default — free, no license needed, good performance."""
 
-SOLVER_TIME_LIMIT = 300
-"""Maximum solve time per hourly problem, in seconds."""
+SOLVER_TIME_LIMIT = 600
+"""Maximum solve time per hourly problem, in seconds.
+   The slowest hour of 2010-05-04 needs ~300 s on one thread (parallel runs)."""
 
 MIP_GAP = 0.0
 """Relative MIP gap. Set to 0 for exact solutions (as in the paper)."""
+
+HIGHS_OPTIONS: dict[str, float | int | str] = {}
+"""Extra HiGHS options (search strategy only — they never change the model)."""
 
 # ===========================================================================
 #  ITALIAN MARKET PARAMETERS

@@ -21,12 +21,12 @@ from pun_clearing.model.data_classes import (
     DemandBid, HourlyData, Line, PunBid, SupplyBid, Zone,
 )
 from pun_clearing.model.pun_model import build_and_solve
+from pun_clearing.run_hourly import solve_hours
 
 NORD, XFRA = 1, 2
 
 
-@pytest.fixture(scope="module")
-def solved() -> HourlyData:
+def make_market() -> HourlyData:
     zones = {
         NORD: Zone(zone_id=NORD, name="NORD", is_pun=True),
         XFRA: Zone(zone_id=XFRA, name="XFRA", is_pun=False),
@@ -46,9 +46,23 @@ def solved() -> HourlyData:
         PunBid(bid_id=8, zone_id=NORD, period=1, volume=80.0, price=25.0, merit_order=3),
         PunBid(bid_id=9, zone_id=NORD, period=1, volume=80.0, price=15.0, merit_order=4),
     ]
-    data = HourlyData(period=1, zones=zones, lines=lines, supply_bids=supply,
+    return HourlyData(period=1, zones=zones, lines=lines, supply_bids=supply,
                       demand_bids=demand, pun_bids=pun)
-    return build_and_solve(data, solver_name="appsi_highs")
+
+
+@pytest.fixture(scope="module")
+def solved() -> HourlyData:
+    return build_and_solve(make_market(), solver_name="appsi_highs")
+
+
+def test_parallel_solve_matches_sequential(solved):
+    """Solving in worker processes (--jobs) gives the same result."""
+    hours = {1: make_market(), 2: make_market()}
+    results = solve_hours(hours, [1, 2], "appsi_highs", verbose=False, jobs=2)
+    for data, elapsed in results.values():
+        assert data.pun_price == pytest.approx(solved.pun_price, abs=1e-6)
+        assert data.zonal_prices == pytest.approx(solved.zonal_prices, abs=1e-6)
+        assert elapsed > 0
 
 
 def test_pun_price(solved):
@@ -90,3 +104,7 @@ def test_pun_is_weighted_average_of_zonal_prices(solved):
     total = sum(d for d, _ in executed)
     weighted = sum(d * zeta for d, zeta in executed)
     assert solved.pun_price == pytest.approx(weighted / total, abs=1e-6)
+
+
+def test_solver_status_recorded(solved):
+    assert solved.solver_status == "optimal"

@@ -27,6 +27,7 @@ points at `src/pun_clearing`, so code changes take effect without reinstalling.
 ```bash
 pun-clearing --path data --date 20100504 --quiet              # all 24 hours
 pun-clearing --path data --date 20100504 --hours 8 9 13       # selected hours
+pun-clearing --path data --date 20100504 --jobs 8 --quiet     # 8 hours in parallel
 ```
 
 Or from Python:
@@ -65,7 +66,8 @@ The same checks run on GitHub Actions (`.github/workflows/ci.yml`).
 │   ├── dataio/gme_importer.py  # reads GME XML files into data classes
 │   └── run_hourly.py           # CLI entry point (`pun-clearing`)
 └── tests/
-    ├── test_synthetic.py       # tiny hand-checkable market
+    ├── test_synthetic.py       # tiny hand-checkable market (+ parallel solving)
+    ├── test_model_helpers.py   # helpers used to build the MILP
     ├── test_gme_importer.py    # parsing of the GME files
     └── test_gme_validation.py  # model vs. published GME prices (slow)
 ```
