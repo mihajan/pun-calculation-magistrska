@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pun-clearing"
+version = "0.1.0"
+description = "MILP clearing of the Italian day-ahead market with PUN (Savelli et al., 2017)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Miha Jan" }]
+dependencies = [
+    "pyomo>=6.7",
+    "highspy>=1.7",
+    "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "mypy>=1.10",
+    "flake8>=7.0",
+    "lxml-stubs>=0.5",
+]
+
+[project.scripts]
+pun-clearing = "pun_clearing.run_hourly:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pun_clearing = ["py.typed"]
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: solves real GME hours (~20-60 s each); skip with -m \"not slow\"",
+]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "tests"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["pyomo.*", "highspy.*"]
+ignore_missing_imports = true
