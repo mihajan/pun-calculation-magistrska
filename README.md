@@ -22,6 +22,21 @@ all results, charts and one hour (hour 9) examined in detail. It opens directly 
 GitHub, without running anything. The hourly results are also in
 [`results/20100504_hourly.csv`](results/20100504_hourly.csv).
 
+## Where to look in the code
+
+| What | Where |
+|---|---|
+| **The MILP (start here)** | [`model/pun_model.py`](src/pun_clearing/model/pun_model.py) → `build_model()` |
+| Bilevel → single level | `_add_lower_level_dual()`, `_add_strong_duality()` |
+| PUN definition (eq. 1) | `_add_pun_definition()`, `_add_binary_expansion()` |
+| Big-M linearisations (M = 3000) | `_add_linearizations()` |
+| ITM / ATM rules, merit order | `_add_upper_level()` |
+| Parameters (M, ε, B, c, solver) | [`conf/options.py`](src/pun_clearing/conf/options.py) |
+| Reading GME files | [`dataio/gme_importer.py`](src/pun_clearing/dataio/gme_importer.py) |
+| Validation against GME prices | [`tests/test_gme_validation.py`](tests/test_gme_validation.py) |
+
+Everything else (CLI, API, Docker) only wraps these.
+
 ## Setup
 
 Requires Python ≥ 3.10.
