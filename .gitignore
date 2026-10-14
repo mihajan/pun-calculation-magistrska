@@ -9,3 +9,4 @@ dist/
 
 # Extracted on demand from the .zip files in data/
 data/*.xml
+.ipynb_checkpoints/

@@ -7,6 +7,21 @@ electricity market with Uniform Purchase Price (PUN) and zonal selling prices.
 for the Electricity Market Clearing Problem with Uniform Purchase Price and
 Zonal Selling Prices," IEEE Trans. Power Syst., 2017.
 
+## Results at a glance
+
+Run on all orders of the Italian day-ahead market (MGP) of **4 May 2010**:
+
+- the model reproduces the **published PUN in all 24 hours** (largest difference
+  4.5·10⁻⁷ €/MWh) and **every zonal price** of the six Italian zones;
+- the market splits in 17 of 24 hours (Sicily and Sardinia, at times also the north),
+  with up to four price areas at once;
+- every hour is solved to proven optimality with the open-source solver HiGHS.
+
+📓 **[Results notebook](notebooks/results_20100504.ipynb)**: the model explained,
+all results, charts and one hour (hour 9) examined in detail. It opens directly on
+GitHub, without running anything. The hourly results are also in
+[`results/20100504_hourly.csv`](results/20100504_hourly.csv).
+
 ## Setup
 
 Requires Python ≥ 3.10.
@@ -15,7 +30,7 @@ Requires Python ≥ 3.10.
 python -m venv .venv
 # Windows (PowerShell):  .venv\Scripts\Activate.ps1
 # Linux / macOS:         source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev]"          # add ,notebook for the results notebook: ".[dev,notebook]"
 ```
 
 `-e` installs the package in *editable* mode: the installed `pun_clearing`
@@ -79,6 +94,12 @@ Example response of `/clear/20100504/9` (abridged):
 }
 ```
 
+The CLI runs in the same image, e.g. for the whole day:
+
+```bash
+docker run --rm pun-clearing pun-clearing --path /app/data --date 20100504 --jobs 8 --quiet
+```
+
 `zonal_prices` is empty when the whole country has one price. A request solves
 the hour (seconds to a few minutes); results are cached, so repeating it is
 instant. Requests are solved one at a time. The data directory is
@@ -102,7 +123,9 @@ The same checks run on GitHub Actions (`.github/workflows/ci.yml`).
 ├── pyproject.toml              # package metadata, dependencies, tool config
 ├── .flake8                     # flake8 config (flake8 does not read pyproject.toml)
 ├── Dockerfile, docker-compose.yml
-├── data/                       # GME XML files for 2010-05-04
+├── data/                       # GME files for 2010-05-04 (zipped XML)
+├── notebooks/                  # results notebook (saved with outputs)
+├── results/                    # cached hourly results used by the notebook
 ├── src/pun_clearing/
 │   ├── conf/options.py         # solver config, big-M, binary expansion params
 │   ├── model/data_classes.py   # Bid, Zone, Line, HourlyData — plain containers

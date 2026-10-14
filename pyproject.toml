@@ -20,6 +20,12 @@ api = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
 ]
+notebook = [
+    "ipykernel>=6.29",
+    "nbconvert>=7.16",
+    "matplotlib>=3.8",
+    "pandas>=2.1",
+]
 dev = [
     "pun-clearing[api]",
     "httpx2>=2.0",
