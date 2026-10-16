@@ -2,6 +2,7 @@
 
 import pytest
 
+from market_rules import market_rule_violations
 from pun_clearing.model.pun_model import build_and_solve
 from pun_clearing.run_hourly import HourResult, summarize
 
@@ -11,6 +12,12 @@ from conftest import GME_DATE
 def _solve_and_summarize(gme_day, hour) -> HourResult:
     solution = build_and_solve(gme_day.hours[hour])
     return summarize(GME_DATE, hour, solution, gme_day.real_prices[hour], gme_day.zone_ids)
+
+
+def test_hour_24_obeys_market_rules(gme_day):
+    """A real hour with a market split, fast enough (~2 s) for every CI run."""
+    solution = build_and_solve(gme_day.hours[24])
+    assert market_rule_violations(gme_day.hours[24], solution) == []
 
 
 def test_hour_with_split(gme_day):

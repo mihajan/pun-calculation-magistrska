@@ -1,5 +1,5 @@
 """
-Solve the MILP on a tiny synthetic market whose result can be checked by hand.
+Solve the MILP on tiny synthetic markets whose results can be checked by hand.
 
 Market setup:
   - Zone 1 (NORD): PUN zone
@@ -15,8 +15,11 @@ price. Supply at 5, 10, 20 (250 MWh) meets demand 80 + 80 + 30 = 190 MWh plus
 60 MWh of the PUN bid at 25 €/MWh, which is at-the-money and sets π = 25.
 """
 
+from dataclasses import replace
+
 import pytest
 
+from market_rules import market_rule_violations
 from pun_clearing.model.data_classes import HourlyData, Order, PunOrder, Solution, Zone
 from pun_clearing.model.pun_model import build_and_solve
 from pun_clearing.run_hourly import solve_hours
@@ -118,3 +121,70 @@ def test_failed_hour_is_reported():
     results, failed = solve_hours([make_market(1)], solver="no_such_solver")
     assert results == {}
     assert "not available" in failed[1]
+
+
+def test_market_rules_hold(market, solved):
+    assert market_rule_violations(market, solved) == []
+
+
+def test_market_rule_check_catches_a_wrong_solution(market, solved):
+    """The checker itself must flag a solution that breaks the rules."""
+    wrong = replace(solved, acceptance=replace(solved.acceptance, pun=[1.0, 0.0, 0.75, 0.0]))
+    assert any("PUN bid 1" in e for e in market_rule_violations(market, wrong))
+
+
+# ------------------------------------------------------------------------
+#  Congested market: two PUN zones, link of 10 MWh
+#
+#  Zone A: offer 100 MWh at 10; PUN bids 40 MWh (no limit) and 10 MWh at 15
+#  Zone B: offer 100 MWh at 30; PUN bids 40 MWh (no limit) and 10 MWh at 25
+#
+#  B imports only 10 MWh, so ζ_A = 10 and ζ_B = 30.
+#  The bid at 25 must be accepted: rejecting it would give π = 20 < 25.
+#  With it, π = (40·10 + 50·30) / 90 = 21.111, so the bid at 15 is rejected,
+#  although 15 > ζ_A — the PUN, not the zonal price, decides.
+#  Welfare = 3000·80 + 25·10 − (10·50 + 30·40) = 238 550.
+# ------------------------------------------------------------------------
+
+A, B = 1, 2
+
+
+@pytest.fixture(scope="module")
+def congested() -> HourlyData:
+    return HourlyData(
+        period=1,
+        zones={A: Zone(zone_id=A, name="NORD", is_pun=True),
+               B: Zone(zone_id=B, name="SICI", is_pun=True)},
+        flow_limits={(A, B): 10.0, (B, A): 10.0},
+        supply_bids=[Order(zone_id=A, volume=100.0, price=10.0),
+                     Order(zone_id=B, volume=100.0, price=30.0)],
+        demand_bids=[],
+        pun_bids=[PunOrder(zone_id=A, volume=40.0, price=3000.0, merit_order=1),
+                  PunOrder(zone_id=B, volume=40.0, price=3000.0, merit_order=2),
+                  PunOrder(zone_id=B, volume=10.0, price=25.0, merit_order=3),
+                  PunOrder(zone_id=A, volume=10.0, price=15.0, merit_order=4)],
+    )
+
+
+@pytest.fixture(scope="module")
+def congested_solved(congested) -> Solution:
+    return build_and_solve(congested)
+
+
+def test_congestion_splits_zonal_prices(congested_solved):
+    assert congested_solved.zonal_prices[A] == pytest.approx(10.0, abs=1e-6)
+    assert congested_solved.zonal_prices[B] == pytest.approx(30.0, abs=1e-6)
+
+
+def test_pun_rule_decides_acceptance(congested_solved):
+    assert congested_solved.pun_price == pytest.approx(190 / 9, abs=1e-6)
+    assert congested_solved.acceptance.pun == pytest.approx([1.0, 1.0, 1.0, 0.0], abs=1e-6)
+    assert congested_solved.acceptance.supply == pytest.approx([0.5, 0.4], abs=1e-6)
+
+
+def test_congested_welfare(congested_solved):
+    assert congested_solved.social_welfare == pytest.approx(238550.0, abs=1e-4)
+
+
+def test_congested_market_rules(congested, congested_solved):
+    assert market_rule_violations(congested, congested_solved) == []
