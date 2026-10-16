@@ -1,66 +1,94 @@
-# PUN Clearing — Savelli et al. (2017) MILP Implementation
+# PUN clearing
 
-Implementation of the MILP market clearing model for the Italian day-ahead
-electricity market with Uniform Purchase Price (PUN) and zonal selling prices.
+Implementacija MILP modela iz članka Savelli et al. (2017) za italijanski day-ahead
+trg. Proizvajalci so plačani po conski ceni, odjemalci pa plačajo PUN.
 
-**Reference:** Savelli, Giannitrapani, Paoletti, Vicino — "An Optimization Model
-for the Electricity Market Clearing Problem with Uniform Purchase Price and
-Zonal Selling Prices," IEEE Trans. Power Syst., 2017.
+## Rezultati
 
-## Results at a glance
+Model je preizkušen na podatkih italijanskega trga za 4. maj 2010 (isti dan kot so  predstavljeni rezultati v članku):
 
-Run on all orders of the Italian day-ahead market (MGP) of **4 May 2010**:
+- izračunani PUN je v vseh 24 urah enak objavljenemu;
+- market split se pojavi v 17 urah; običajno se ločita Sicilija in Sardinija,
+  v nekaterih urah tudi sever, tako da so hkrati lahko štiri različne cene;
+- Uporablja se solver HiGHS, ki je prosto dostopen. Izračun posamezne ure traja v povprečju minuto.
 
-- the model reproduces the **published PUN in all 24 hours** (largest difference
-  4.5·10⁻⁷ €/MWh) and **every zonal price** of the six Italian zones;
-- the market splits in 17 of 24 hours (Sicily and Sardinia, at times also the north),
-  with up to four price areas at once;
-- every hour is solved to proven optimality with the open-source solver HiGHS.
-
-**[Results notebook](notebooks/results_20100504.ipynb)**: all results, charts
-and one hour (hour 9) examined in detail. It opens directly on
-GitHub, without running anything. The hourly results are also in
+Rezultati z grafi in podrobnejšo analizo ene izmed ur so vidni v
+[notebooku](notebooks/results_20100504.ipynb).
+Urni rezultati, ki jih notebook uporabi so shranjeni v
 [`results/20100504_hourly.csv`](results/20100504_hourly.csv).
 
-## Where to look in the code
+## Ključne funkcije
 
-| What | Where |
+| Kaj | Lokacija |
 |---|---|
-| **The MILP (start here)** | [`model/pun_model.py`](src/pun_clearing/model/pun_model.py) → `build_model()` |
-| Bilevel → single level | `_add_lower_level_dual()`, `_add_strong_duality()` |
-| PUN definition (eq. 1) | `_add_pun_definition()`, `_add_binary_expansion()` |
-| Big-M linearisations (M = 3000) | `_add_linearizations()` |
-| ITM / ATM rules, merit order | `_add_upper_level()` |
-| Parameters (M, ε, B, c, solver) | [`conf/options.py`](src/pun_clearing/conf/options.py) |
-| Reading GME files | [`dataio/gme_importer.py`](src/pun_clearing/dataio/gme_importer.py) |
-| Validation against GME prices | [`tests/test_gme_validation.py`](tests/test_gme_validation.py) |
+| **MILP model** | [`model/pun_model.py`](src/pun_clearing/model/pun_model.py) → `build_model()` |
+| Prehod iz bilevel v single-level problem | `_add_lower_level_dual()`, `_add_strong_duality()` |
+| Definicija PUN (en. 1) | `_add_pun_definition()`, `_add_binary_expansion()` |
+| Linearizacije z big-M (M = 3000) | `_add_linearizations()` |
+| ITM / ATM in merit order | `_add_upper_level()` |
+| PUN ponudbe brez cenovne omejitve (vedno sprejete) | `_fix_max_price_bids()` |
+| Parametri (M, ε, B, c, solver) | [`conf/options.py`](src/pun_clearing/conf/options.py) |
+| Branje podatkov GME | [`dataio/gme_importer.py`](src/pun_clearing/dataio/gme_importer.py) |
+| Primerjava z objavljenimi cenami | [`tests/test_gme_validation.py`](tests/test_gme_validation.py) |
 
-The CLI only wraps these.
 
-## Setup
+## Namestitev
 
-Requires Python ≥ 3.10.
+Če želite sami prezkusiti celotno kodo je potrebno slediti naslednjim navodilom:
+
+Potrebuješte Python 3.10 ali novejši.
+
+**1. Prenesite repozitorij**
+
+```bash
+git clone https://github.com/mihajan/pun-calculation-magistrska.git
+cd pun-calculation-magistrska
+```
+
+**2. Ustvarite in aktivirajte virtualno okolje**, da se paketi namestijo samo za ta projekt:
 
 ```bash
 python -m venv .venv
-# Windows (PowerShell):  .venv\Scripts\Activate.ps1
-# Linux / macOS:         source .venv/bin/activate
-pip install -e ".[dev]"          # add ,notebook for the results notebook: ".[dev,notebook]"
+.venv\Scripts\Activate.ps1        # Windows (PowerShell)
+source .venv/bin/activate         # Linux / macOS
 ```
 
-`-e` installs the package in *editable* mode: the installed `pun_clearing`
-points at `src/pun_clearing`, so code changes take effect without reinstalling.
-`[dev]` also installs pytest, mypy and flake8.
-
-## Usage
+**3. Namestite paket** — izberi eno od možnosti:
 
 ```bash
-pun-clearing --path data --date 20100504 --quiet              # all 24 hours
-pun-clearing --path data --date 20100504 --hours 8 9 13       # selected hours
-pun-clearing --path data --date 20100504 --jobs 8 --quiet     # 8 hours in parallel
+pip install -e .                  # model in ukaz pun-clearing
+pip install -e ".[notebook]"      # + vse, kar potrebuje notebook
+pip install -e ".[dev]"           # + orodja za razvoj (pytest, mypy, flake8)
 ```
 
-Or from Python:
+Solver HiGHS se namesti skupaj s paketom. Zaradi `-e` spremembe v kodi veljajo
+takoj, brez ponovne namestitve.
+
+## Uporaba
+
+Ukaz `pun-clearing` prebere podatke GME za izbrani dan, izračuna izbrane ure in
+rezultate primerja z objavljenimi cenami. Trenutno so v mapi podatki le za 4. maj 2010 in sicer v mapi `data`.
+
+```bash
+pun-clearing --path data --date 20100504 --hours 9               # ena ura
+pun-clearing --path data --date 20100504 --hours 8 9 13          # več ur
+pun-clearing --path data --date 20100504 --jobs 8 --quiet        # cel dan, 8 ur hkrati
+```
+
+| Možnost | Pomen |
+|---|---|
+| `--path` | mapa s podatki GME |
+| `--date` | datum v obliki YYYYMMDD |
+| `--hours` | ure, ki jih želiš izračunati (privzeto vseh 24) |
+| `--jobs` | koliko ur se računa hkrati (privzeto 1) |
+| `--quiet` | brez sprotnega izpisa solverja |
+| `--json` | rezultati v obliki JSON namesto tabele |
+
+Za vsako uro izpiše PUN iz modela, objavljeni PUN in razliko med njima, za ure z
+market splitom pa še conske cene vseh šestih con. Cel dan po vrsti traja okoli
+20 minut, z `--jobs 8` nekaj minut.
+
+Model lahko pokličeš tudi iz Pythona:
 
 ```python
 from pun_clearing.dataio.gme_importer import load_day
@@ -71,67 +99,32 @@ solution = build_and_solve(day.hours[9])
 print(solution.pun_price, solution.zonal_prices)
 ```
 
-A single hour as JSON (model PUN, published PUN and, if the market split,
-the zonal prices of the six Italian zones):
+Notebook odpreš v VS Code ali Jupytru; kot kernel izberi `.venv`.
 
-```bash
-pun-clearing --path data --date 20100504 --hours 9 --json
-```
 
-## Development checks
-
-```bash
-flake8 src tests          # style
-mypy                      # static types
-pytest -m "not slow"      # fast tests (~5 s)
-pytest -m slow            # validation against published GME prices (~2 min)
-pytest                    # everything
-```
-
-The same checks run on GitHub Actions (`.github/workflows/ci.yml`).
-
-## Project structure
+## Struktura repozitorija
 
 ```
-├── pyproject.toml              # package metadata, dependencies, tool config
-├── .flake8                     # flake8 config (flake8 does not read pyproject.toml)
-├── data/                       # GME files for 2010-05-04 (zipped XML)
-├── notebooks/                  # results notebook (saved with outputs)
-├── results/                    # cached hourly results used by the notebook
+├── pyproject.toml              # opis paketa, odvisnosti, nastavitve orodij
+├── .flake8                     # nastavitve flake8 (pyproject.toml ne bere)
+├── data/                       # podatki GME za 4. 5. 2010 (zipani XML)
+├── notebooks/                  # notebook z rezultati (skupaj z izpisi)
+├── results/                    # shranjeni urni rezultati za notebook
 ├── src/pun_clearing/
-│   ├── conf/options.py         # solver config, big-M, binary expansion params
-│   ├── model/data_classes.py   # Order, Zone, HourlyData (input), Solution (output)
-│   ├── model/pun_model.py      # THE CORE: builds and solves the Savelli 2017 MILP
-│   ├── dataio/gme_importer.py  # reads GME XML files into data classes
-│   └── run_hourly.py           # CLI (`pun-clearing`): solve hours, compare with GME
-└── tests/
-    ├── test_synthetic.py       # tiny hand-checkable market (+ parallel solving)
-    ├── test_model_helpers.py   # helpers used to build the MILP
-    ├── test_gme_importer.py    # parsing of the GME files
-    ├── test_report.py          # per-hour summary printed by the CLI
-    └── test_gme_validation.py  # model vs. published GME prices (slow)
+│   ├── conf/options.py         # solver, big-M, parametri binary expansion
+│   ├── model/data_classes.py   # Order, Zone, HourlyData (vhod), Solution (rezultat)
+│   ├── model/pun_model.py      # jedro: zgradi in reši MILP
+│   ├── dataio/gme_importer.py  # branje XML datotek GME
+│   └── run_hourly.py           # CLI (`pun-clearing`): izračun ur in primerjava z GME
+└── tests/                      #testi za pravilno delovanje in oblikovanje kode
 ```
 
-## How the code maps to the paper
+## Povezava s člankom
 
-The MILP in Appendix A of Savelli 2017 has equations (34)–(66).
-Each constraint in `pun_model.py` is labeled with the corresponding
-equation number. The pipeline is:
+MILP iz dodatka A članka obsega enačbe (34)–(66). Pri vsaki omejitvi v
+`pun_model.py` je v komentarju številka enačbe, ki se direktno nanaša na članek.
 
-1. **Bilevel model** (Section II-A): upper level handles UPP rule + binary
-   variables; lower level is an LP that clears the market.
-2. **Single-level equivalent** (Section II-B): replace lower level LP with
-   strong duality + primal feasibility + dual feasibility.
-3. **MILP linearization** (Section II-C): linearize all bilinear terms
-   (binary × continuous via big-M = 3000, binary expansion for UPP definition).
+Tako izvirni članek kot implementacija v tem repozitoriju ne sprejemata block orderjev in so zato ure med seboj neodvisne. Namesto enega velikega
+problema za cel dan zato rešimo 24 manjših MILP-ov. To vpliva tudi na testno obdobje, saj moramo MILP testirati na (zelo) starih podatkih, ko še ni bilo block orderjev, saj le tako lahko dobimo rezultate enake objavljenim. 
 
-Since we have NO block orders, each hour is independent → we solve 24
-separate MILPs per day instead of one coupled 24-hour problem.
 
-## Key simplifications vs. openDAM (Savelli et al. 2018)
-
-- No block orders (no `rp`, `ubp`, `vphibMax`, `vphibMin`)
-- No `u^w_tk` / `u^d_tk` split — only `u^e_k` for at-the-money orders
-- No market-split detection (`uf` variables) — can be added later
-- No `κ_t` tolerance — exact PUN definition (eq. 1 of the paper)
-- Hourly independence — 24 small MILPs instead of 1 large one
