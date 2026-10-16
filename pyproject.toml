@@ -16,10 +16,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-api = [
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
-]
 notebook = [
     "ipykernel>=6.29",
     "nbconvert>=7.16",
@@ -27,8 +23,6 @@ notebook = [
     "pandas>=2.1",
 ]
 dev = [
-    "pun-clearing[api]",
-    "httpx2>=2.0",
     "pytest>=8.0",
     "mypy>=1.10",
     "flake8>=7.0",

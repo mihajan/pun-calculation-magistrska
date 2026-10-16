@@ -1,6 +1,0 @@
-services:
-  api:
-    build: .
-    image: pun-clearing
-    ports:
-      - "8000:8000"
