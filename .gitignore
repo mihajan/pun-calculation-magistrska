@@ -7,6 +7,6 @@ dist/
 .pytest_cache/
 .mypy_cache/
 
-# Extracted on demand from the .zip files in data/
+# Unzipped copies are optional: the importer reads the .zip files directly
 data/*.xml
 .ipynb_checkpoints/

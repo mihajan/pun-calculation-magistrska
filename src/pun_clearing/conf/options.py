@@ -1,81 +1,40 @@
 """
-Configuration for the PUN clearing MILP.
-
-Parameters here correspond to the values described in Section III (Results)
-of Savelli et al. 2017:
-  - ε = 10^-6  (constraint 7/36: strict inequality tolerance)
-  - c = 3      (number of decimal digits in binary expansion)
-  - B = 24     (number of bits in binary expansion)
-  - M1 = -3000, M2 = 3000  (big-M bounds, from Italian market price cap)
-
-The solver is CPLEX via Pyomo. If you don't have CPLEX, you can substitute
-'glpk', 'gurobi', or 'highs' — but CPLEX is recommended for performance.
+Parameters of the PUN clearing MILP (values from Section III of Savelli et al. 2017)
+and of the solver.
 """
 
 # ===========================================================================
-#  SOLVER SETUP
-# ===========================================================================
-
-SOLVER_NAME = 'appsi_highs'
-"""Which solver to use. Options: 'appsi_highs', 'cplex', 'gurobi', 'glpk'.
-   'appsi_highs' requires: pip install highspy
-   This is the default — free, no license needed, good performance."""
-
-SOLVER_TIME_LIMIT = 600
-"""Maximum solve time per hourly problem, in seconds.
-   The slowest hour of 2010-05-04 needs ~300 s on one thread (parallel runs)."""
-
-MIP_GAP = 0.0
-"""Relative MIP gap. Set to 0 for exact solutions (as in the paper)."""
-
-HIGHS_OPTIONS: dict[str, float | int | str] = {}
-"""Extra HiGHS options (search strategy only — they never change the model)."""
-
-# ===========================================================================
-#  ITALIAN MARKET PARAMETERS
+#  MODEL
 # ===========================================================================
 
 MAX_PRICE = 3000.0
-"""Maximum allowed price on the Italian market (€/MWh).
-   Orders without a specified price are set to this value.
-   This also serves as M2 in the big-M linearization."""
-
-MIN_PRICE = 0.0
-"""Minimum allowed price (€/MWh). Serves as |M1| bound."""
+"""Price cap of the Italian market (€/MWh). Bids without a price limit get this
+   price, and it is the big-M of all linearisations."""
 
 EPSILON = 1e-6
-"""ε in constraint (7)/(36): ensures strict inequality p^d_k > π.
-   The paper uses 10^-6. Must be smaller than the price resolution."""
-
-# ===========================================================================
-#  BINARY EXPANSION PARAMETERS  (Section II-C, equations 29/53)
-# ===========================================================================
+"""ε in constraint (7)/(36): turns p^d_k > π into p^d_k − π ≥ ε."""
 
 BINARY_EXP_BITS = 24
-"""B: number of bits in the binary expansion.
-   With c=3 decimal digits, the maximum representable integer is 2^B - 1.
-   B=24 can represent up to 16,777,215 → i.e., up to 16,777.215 MWh,
-   which is more than enough for any single zone's at-the-money demand."""
+"""B: bits of the binary expansion. With c = 3 decimals, 2^24 − 1 = 16,777,215
+   represents up to 16,777.215 MWh of at-the-money demand per zone."""
 
 BINARY_EXP_DECIMALS = 3
-"""c: number of decimal digits. Italian market uses 3 (quantities in kWh).
-   The binary expansion multiplies quantities by 10^c to get integers."""
-
-# ===========================================================================
-#  PUN ZONES  (the 6 Italian physical zones enforcing the UPP rule)
-# ===========================================================================
+"""c: decimals of the binary expansion (quantities in kWh)."""
 
 PUN_ZONES = ("NORD", "CNOR", "CSUD", "SUD", "SICI", "SARD")
-"""Zones where the Uniform Purchase Price (PUN) rule is enforced.
-   Consumers in these zones pay π (unless they are pumping units).
-   Producers in all zones receive their respective zonal price ζ_i."""
+"""Zones enforcing the UPP rule: their consumers (except pumping units) pay π."""
 
 # ===========================================================================
-#  NUMERICAL TOLERANCES
+#  SOLVER
 # ===========================================================================
 
-EPS = 1e-4
-"""Threshold for considering a volume as nonzero in solution extraction."""
+SOLVER_NAME = "appsi_highs"
+"""Default solver: HiGHS, installed with the package (highspy)."""
 
-VERBOSE = True
-"""Whether to print solver output to stdout."""
+SOLVER_OPTIONS: dict[str, dict[str, float | int | str]] = {
+    "appsi_highs": {
+        "time_limit": 600.0,   # s per hour; the slowest hour needs ~340 s on one thread
+        "mip_rel_gap": 0.0,    # exact optimum, as in the paper
+    },
+}
+"""Options passed to each solver. They change how the solver searches, never the model."""

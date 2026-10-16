@@ -1,87 +1,58 @@
 """
-Data classes for the PUN clearing model — plain containers, no optimisation logic.
+Inputs and results of one hourly clearing problem.
 
-They map to the paper's notation:
-
-  - SupplyBid:  offer order (s^max_p, p^s_p) from producer p
-  - DemandBid:  bid order (d^max_k, p^d_k) from non-UPP consumer k ∈ K^ζ ∪ K^p
-  - PunBid:     bid order (d^max_k, p^d_k, m_k) from UPP consumer k ∈ K^π
-  - Zone:       market zone i ∈ Z
-  - Line:       inter-zonal transmission link with capacity F^max_ij
-
-Bids use eq=False: two bids with identical values are still different orders.
+  - Order:       an offer (s^max_p, p^s_p) or a non-UPP bid (d^max_k, p^d_k)
+  - PunOrder:    a UPP bid (d^max_k, p^d_k, m_k) — the consumer pays the PUN
+  - Zone:        market zone i ∈ Z
+  - HourlyData:  everything the MILP needs for one hour (input only)
+  - Solution:    what the MILP returns for one hour
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
-@dataclass(eq=False)
-class SupplyBid:
-    """A supply (offer) order from a producer."""
-    bid_id: int
+@dataclass(frozen=True)
+class Order:
     zone_id: int        # i ∈ Z
-    period: int         # hour t ∈ {1, ..., 24}
-    volume: float       # s^max_p — maximum quantity offered (MWh), positive
-    price: float        # p^s_p — minimum acceptable price (€/MWh)
-    acceptance: float = 0.0   # filled after solving: s_p / s^max_p
+    volume: float       # maximum quantity (MWh), positive
+    price: float        # limit price (€/MWh)
 
 
-@dataclass(eq=False)
-class DemandBid:
-    """A demand order from a NON-UPP consumer (K^ζ, or pumping units K^p).
-
-    These consumers pay the zonal price, not the PUN.
-    """
-    bid_id: int
-    zone_id: int
-    period: int
-    volume: float       # d^max_k — maximum quantity demanded (MWh), positive
-    price: float        # p^d_k — maximum willingness to pay (€/MWh)
-    acceptance: float = 0.0
-
-
-@dataclass(eq=False)
-class PunBid:
-    """A demand order from a UPP consumer (k ∈ K^π), who pays the PUN π."""
-    bid_id: int
-    zone_id: int        # i ∈ Z^π (a PUN zone)
-    period: int
-    volume: float       # d^max_k (MWh), positive
-    price: float        # p^d_k (€/MWh)
+@dataclass(frozen=True)
+class PunOrder(Order):
     merit_order: int    # m_k — economic merit order (lower = higher priority)
-    acceptance: float = 0.0
 
 
-@dataclass
+@dataclass(frozen=True)
 class Zone:
-    """A market zone; is_pun marks zones enforcing the UPP rule (i ∈ Z^π)."""
     zone_id: int
     name: str           # e.g. "NORD", "SICI", "FRAN"
-    is_pun: bool = False
+    is_pun: bool        # True if the zone enforces the UPP rule (i ∈ Z^π)
 
 
-@dataclass
-class Line:
-    """An inter-zonal transmission line with hourly capacities (MWh)."""
-    line_id: int
-    from_zone_id: int
-    to_zone_id: int
-    capacity: dict[int, float]       # {period: F^max_ij}, from → to
-    capacity_rev: dict[int, float]   # {period: F^max_ji}, to → from
-
-
-@dataclass
+@dataclass(frozen=True)
 class HourlyData:
-    """All input data for one hourly clearing problem, plus its results."""
     period: int
     zones: dict[int, Zone]
-    lines: list[Line]
-    supply_bids: list[SupplyBid]
-    demand_bids: list[DemandBid]
-    pun_bids: list[PunBid]
+    flow_limits: dict[tuple[int, int], float]   # (from, to) → F^max_ij for this hour (MWh)
+    supply_bids: list[Order]                    # offers from producers
+    demand_bids: list[Order]                    # bids from non-UPP consumers (pay ζ_i)
+    pun_bids: list[PunOrder]                    # bids from UPP consumers (pay π)
 
-    # Filled after solving
-    pun_price: float | None = None                              # π
-    zonal_prices: dict[int, float] = field(default_factory=dict)  # {zone_id: ζ_i}
-    social_welfare: float | None = None                         # objective value
-    solver_status: str | None = None                            # "optimal" if proven
+
+@dataclass(frozen=True)
+class Acceptance:
+    """Accepted share (0–1) of each order, index-aligned with the HourlyData lists."""
+    supply: list[float]
+    demand: list[float]
+    pun: list[float]
+
+
+@dataclass(frozen=True)
+class Solution:
+    pun_price: float                 # π
+    zonal_prices: dict[int, float]   # {zone_id: ζ_i}
+    social_welfare: float            # objective value
+    status: str                      # solver termination condition, "optimal" if proven
+    acceptance: Acceptance
+    solve_time_s: float              # building + solving the MILP

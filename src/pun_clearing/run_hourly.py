@@ -5,29 +5,23 @@ Usage (after `pip install -e .`):
     pun-clearing --path data --date 20100504 --quiet
     pun-clearing --path data --date 20100504 --hours 8 9 13
     pun-clearing --path data --date 20100504 --jobs 8      # 8 hours in parallel
-    pun-clearing --path data --date 20100504 --hours 9 --quiet --json
+    pun-clearing --path data --date 20100504 --hours 9 --json
 
-This will:
-  1. Read the GME XML files for the given date
-  2. Solve the independent hourly MILP problems (optionally in parallel)
-  3. Compare the computed PUN and zonal prices with published values
-  4. Print a summary table
-
-Prerequisites:
-  - Download the 4 GME XML files for the date into --path
-  - Pyomo and a MILP solver (default: HiGHS via highspy, installed with the package)
+Reads the GME files of the date, solves each hour as its own MILP and compares
+the PUN and zonal prices with the published ones.
 """
 
 import argparse
 import json
 import logging
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 
 from pun_clearing.conf import options
-from pun_clearing.dataio.gme_importer import GMEImporter
-from pun_clearing.model.data_classes import HourlyData
+from pun_clearing.dataio.gme_importer import load_day
+from pun_clearing.model.data_classes import HourlyData, Solution
 from pun_clearing.model.pun_model import build_and_solve
 
 logger = logging.getLogger(__name__)
@@ -38,9 +32,51 @@ SPLIT_TOLERANCE = 1e-6
 DECIMALS = 6
 
 
-def _round(x: float | None) -> float | None:
-    return None if x is None else round(x, DECIMALS) + 0.0   # + 0.0 turns -0.0 into 0.0
+def _round(x: float) -> float:
+    return round(x, DECIMALS) + 0.0   # + 0.0 turns -0.0 into 0.0
 
+
+# ========================================================================
+#  SOLVING
+# ========================================================================
+
+def _solve_job(job: tuple[HourlyData, str, bool, int | None]) -> Solution | str:
+    """Solve one hour; return the solution, or the error message if it failed."""
+    data, solver, verbose, threads = job
+    try:
+        return build_and_solve(data, solver=solver, verbose=verbose, threads=threads)
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
+def solve_hours(hours: list[HourlyData], solver: str = options.SOLVER_NAME,
+                verbose: bool = False, jobs: int = 1
+                ) -> tuple[dict[int, Solution], dict[int, str]]:
+    """Solve the hours, one at a time or `jobs` at once (one solver thread each).
+
+    Returns the solutions and the error messages of the hours that failed.
+    """
+    threads = 1 if jobs > 1 else None
+    job_args = [(data, solver, verbose, threads) for data in hours]
+    solved: dict[int, Solution] = {}
+    failed: dict[int, str] = {}
+
+    with ProcessPoolExecutor(max_workers=jobs) if jobs > 1 else nullcontext() as pool:
+        run = pool.map if pool is not None else map
+        for data, outcome in zip(hours, run(_solve_job, job_args)):
+            if isinstance(outcome, str):
+                failed[data.period] = outcome
+                logger.error(f"Hour {data.period}: FAILED — {outcome}")
+            else:
+                solved[data.period] = outcome
+                logger.info(f"Hour {data.period}: solved in {outcome.solve_time_s:.2f}s, "
+                            f"PUN = {outcome.pun_price:.6f}")
+    return solved, failed
+
+
+# ========================================================================
+#  COMPARISON WITH GME
+# ========================================================================
 
 @dataclass
 class ZonePrice:
@@ -60,89 +96,42 @@ class HourResult:
     market_split: bool
     zonal_prices: list[ZonePrice] = field(default_factory=list)  # only if market_split
     solve_time_s: float = 0.0
-    solver_status: str | None = None
+    solver_status: str = ""
 
 
-def summarize(date: str, data: HourlyData, real_prices: dict[str, float],
-              solve_time_s: float = 0.0) -> HourResult:
-    """Turn a solved hour into a result comparable with the published prices."""
-    assert data.pun_price is not None, "hour has not been solved"
-    zone_names = {zone.zone_id: zone.name for zone in data.zones.values()}
-
+def summarize(date: str, hour: int, solution: Solution, real_prices: dict[str, float],
+              zone_ids: dict[str, int]) -> HourResult:
+    """Compare a solved hour with the published prices."""
     zonal = []
-    for zone_id, name in zone_names.items():
-        if name not in options.PUN_ZONES:
-            continue
-        model = data.zonal_prices[zone_id]
+    for name in options.PUN_ZONES:
+        model = solution.zonal_prices[zone_ids[name]]
         real = real_prices.get(name)
-        zonal.append(ZonePrice(zone=name, model=round(model, DECIMALS), real=real,
+        zonal.append(ZonePrice(zone=name, model=_round(model), real=real,
                                difference=None if real is None else _round(model - real)))
-    zonal.sort(key=lambda z: options.PUN_ZONES.index(z.zone))
 
     prices = [z.model for z in zonal]
-    split = bool(prices) and max(prices) - min(prices) > SPLIT_TOLERANCE
+    split = max(prices) - min(prices) > SPLIT_TOLERANCE
 
     pun_real = real_prices.get("PUN")
     return HourResult(
         date=date,
-        hour=data.period,
-        pun_model=round(data.pun_price, DECIMALS),
+        hour=hour,
+        pun_model=_round(solution.pun_price),
         pun_real=pun_real,
-        pun_difference=None if pun_real is None else _round(data.pun_price - pun_real),
+        pun_difference=None if pun_real is None else _round(solution.pun_price - pun_real),
         market_split=split,
         zonal_prices=zonal if split else [],
-        solve_time_s=round(solve_time_s, 2),
-        solver_status=data.solver_status,
+        solve_time_s=round(solution.solve_time_s, 2),
+        solver_status=solution.status,
     )
 
 
-def solve_hour(data: HourlyData, solver_name: str,
-               verbose: bool) -> tuple[HourlyData, float]:
-    """Solve one hour and return the filled-in data with the wall-clock time."""
-    t0 = time.perf_counter()
-    build_and_solve(data, solver_name=solver_name, verbose=verbose)
-    return data, time.perf_counter() - t0
+def _fmt(x: float | None, width: int) -> str:
+    return f"{x:>{width}.6f}" if x is not None else f"{'N/A':>{width}}"
 
 
-def _init_worker() -> None:
-    """Run each parallel solve on one thread so N workers use N cores."""
-    logging.basicConfig(level=logging.WARNING)
-    options.HIGHS_OPTIONS["threads"] = 1
-
-
-def solve_hours(hourly_data: dict[int, HourlyData], hours: list[int], solver_name: str,
-                verbose: bool, jobs: int) -> dict[int, tuple[HourlyData, float]]:
-    """Solve the given hours, sequentially (jobs=1) or in a process pool."""
-    results: dict[int, tuple[HourlyData, float]] = {}
-
-    if jobs == 1:
-        for hour in hours:
-            data = hourly_data[hour]
-            logger.info(f"--- Hour {hour}: {len(data.pun_bids)} PUN bids, "
-                        f"{len(data.demand_bids)} demand, {len(data.supply_bids)} supply ---")
-            try:
-                results[hour] = solve_hour(data, solver_name, verbose)
-                logger.info(f"Hour {hour}: solved in {results[hour][1]:.2f}s, "
-                            f"PUN = {data.pun_price:.6f}")
-            except Exception as e:
-                logger.error(f"Hour {hour}: FAILED — {e}")
-        return results
-
-    with ProcessPoolExecutor(max_workers=jobs, initializer=_init_worker) as pool:
-        futures = {pool.submit(solve_hour, hourly_data[h], solver_name, False): h
-                   for h in hours}
-        for future in as_completed(futures):
-            hour = futures[future]
-            try:
-                results[hour] = future.result()
-                logger.info(f"Hour {hour}: solved in {results[hour][1]:.2f}s, "
-                            f"PUN = {results[hour][0].pun_price:.6f}")
-            except Exception as e:
-                logger.error(f"Hour {hour}: FAILED — {e}")
-    return results
-
-
-def print_report(date: str, results: list[HourResult], wall_time: float) -> None:
+def print_report(date: str, results: list[HourResult], failed: dict[int, str],
+                 wall_time: float) -> None:
     print("\n" + "=" * 80)
     print(f"  RESULTS SUMMARY - {date}")
     print("=" * 80)
@@ -150,11 +139,9 @@ def print_report(date: str, results: list[HourResult], wall_time: float) -> None
           f"{'Difference':>12}  {'Split':>5}  {'Time (s)':>10}")
     print(f"  {'-'*4}  {'-'*14}  {'-'*14}  {'-'*12}  {'-'*5}  {'-'*10}")
     for r in results:
-        real = f"{r.pun_real:>14.6f}" if r.pun_real is not None else f"{'N/A':>14}"
-        diff = f"{r.pun_difference:>12.6f}" if r.pun_difference is not None else f"{'N/A':>12}"
         split = "yes" if r.market_split else "no"
-        print(f"  {r.hour:>4}  {r.pun_model:>14.6f}  {real}  {diff}  {split:>5}  "
-              f"{r.solve_time_s:>10.2f}")
+        print(f"  {r.hour:>4}  {_fmt(r.pun_model, 14)}  {_fmt(r.pun_real, 14)}  "
+              f"{_fmt(r.pun_difference, 12)}  {split:>5}  {r.solve_time_s:>10.2f}")
         if r.solver_status != "optimal":
             print(f"        warning: solver status '{r.solver_status}' (not proven optimal)")
 
@@ -170,55 +157,50 @@ def print_report(date: str, results: list[HourResult], wall_time: float) -> None
         print(f"  {'-'*4}  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*12}")
         for r in split_hours:
             for z in r.zonal_prices:
-                real = f"{z.real:>12.6f}" if z.real is not None else f"{'N/A':>12}"
-                diff = f"{z.difference:>12.6f}" if z.difference is not None else f"{'N/A':>12}"
-                print(f"  {r.hour:>4}  {z.zone:>6}  {z.model:>12.6f}  {real}  {diff}")
+                print(f"  {r.hour:>4}  {z.zone:>6}  {_fmt(z.model, 12)}  {_fmt(z.real, 12)}  "
+                      f"{_fmt(z.difference, 12)}")
+
+    if failed:
+        print("\n  FAILED hours (not in the tables above):")
+        for hour, error in sorted(failed.items()):
+            print(f"  {hour:>4}  {error}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description='PUN Market Clearing - Savelli et al. (2017)')
-    parser.add_argument('--path', required=True,
-                        help='Directory containing GME XML files')
-    parser.add_argument('--date', required=True,
-                        help='Date in YYYYMMDD format (e.g. 20100504)')
-    parser.add_argument('--solver', default=options.SOLVER_NAME,
-                        help=f'Solver name (default: {options.SOLVER_NAME})')
-    parser.add_argument('--hours', type=int, nargs='*', default=None,
-                        help='Specific hours to solve (default: all)')
-    parser.add_argument('--jobs', type=int, default=1,
-                        help='Number of hours solved in parallel (default: 1)')
-    parser.add_argument('--quiet', action='store_true',
-                        help='Suppress solver output')
-    parser.add_argument('--json', action='store_true',
-                        help='Print the results as JSON instead of a table')
+    parser = argparse.ArgumentParser(description="PUN market clearing (Savelli et al. 2017)")
+    parser.add_argument("--path", required=True, help="Directory with the GME files")
+    parser.add_argument("--date", required=True, help="Date as YYYYMMDD (e.g. 20100504)")
+    parser.add_argument("--solver", default=options.SOLVER_NAME,
+                        help=f"Solver name (default: {options.SOLVER_NAME})")
+    parser.add_argument("--hours", type=int, nargs="*", default=None,
+                        help="Hours to solve (default: all)")
+    parser.add_argument("--jobs", type=int, default=1,
+                        help="Number of hours solved in parallel (default: 1)")
+    parser.add_argument("--quiet", action="store_true", help="Suppress solver output")
+    parser.add_argument("--json", action="store_true",
+                        help="Print the results as JSON instead of a table")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s',
-                        datefmt='%H:%M:%S')
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s",
+                        datefmt="%H:%M:%S")
 
-    logger.info(f"Loading GME data for {args.date} from {args.path}")
-    importer = GMEImporter(path=args.path, date=args.date)
-    hourly_data = importer.get_hourly_data()
-
-    hours = args.hours or sorted(hourly_data)
-    missing = [h for h in hours if h not in hourly_data]
-    for hour in missing:
-        logger.warning(f"No data for hour {hour}, skipping")
-    hours = [h for h in hours if h in hourly_data]
+    day = load_day(args.path, args.date)
+    hours = args.hours or sorted(day.hours)
+    for hour in hours:
+        if hour not in day.hours:
+            logger.warning(f"No data for hour {hour}, skipping")
 
     t0 = time.perf_counter()
-    results = solve_hours(hourly_data, hours, args.solver,
-                          verbose=not (args.quiet or args.json), jobs=max(1, args.jobs))
+    solved, failed = solve_hours([day.hours[h] for h in hours if h in day.hours], args.solver,
+                                 verbose=not (args.quiet or args.json), jobs=max(1, args.jobs))
     wall_time = time.perf_counter() - t0
 
-    real_prices = importer.get_real_prices()
-    summaries = [summarize(args.date, data, real_prices.get(hour, {}), elapsed)
-                 for hour, (data, elapsed) in sorted(results.items())]
+    results = [summarize(args.date, hour, solution, day.real_prices.get(hour, {}), day.zone_ids)
+               for hour, solution in sorted(solved.items())]
     if args.json:
-        print(json.dumps([asdict(r) for r in summaries], indent=2))
+        print(json.dumps([asdict(r) for r in results], indent=2))
     else:
-        print_report(args.date, summaries, wall_time)
+        print_report(args.date, results, failed, wall_time)
 
 
 if __name__ == "__main__":

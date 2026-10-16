@@ -8,14 +8,14 @@ from pun_clearing.run_hourly import HourResult, summarize
 from conftest import GME_DATE
 
 
-def _solve_and_summarize(gme_importer, hour) -> HourResult:
-    data = build_and_solve(gme_importer.get_hourly_data()[hour], solver_name="appsi_highs")
-    return summarize(GME_DATE, data, gme_importer.get_real_prices()[hour])
+def _solve_and_summarize(gme_day, hour) -> HourResult:
+    solution = build_and_solve(gme_day.hours[hour])
+    return summarize(GME_DATE, hour, solution, gme_day.real_prices[hour], gme_day.zone_ids)
 
 
-def test_hour_with_split(gme_importer):
+def test_hour_with_split(gme_day):
     """Hour 24 (~2 s): SICI and SARD separate from the rest of Italy."""
-    r = _solve_and_summarize(gme_importer, 24)
+    r = _solve_and_summarize(gme_day, 24)
     assert r.pun_model == pytest.approx(56.011383, abs=1e-5)
     assert r.pun_real == pytest.approx(56.011383)
     assert r.market_split
@@ -29,9 +29,9 @@ def test_hour_with_split(gme_importer):
 
 
 @pytest.mark.slow
-def test_hour_without_split(gme_importer):
+def test_hour_without_split(gme_day):
     """Hour 7 (~25 s): one price everywhere, so no zonal prices are listed."""
-    r = _solve_and_summarize(gme_importer, 7)
+    r = _solve_and_summarize(gme_day, 7)
     assert r.pun_model == pytest.approx(47.5, abs=1e-5)
     assert not r.market_split
     assert r.zonal_prices == []

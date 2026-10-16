@@ -23,13 +23,11 @@ ZONAL_TOL = 1e-3
 
 
 @pytest.mark.parametrize("hour", [2, 8, 9, 13])
-def test_matches_published_prices(gme_importer, hour):
-    data = gme_importer.get_hourly_data()[hour]
-    real = gme_importer.get_real_prices()[hour]
-    zone_ids = gme_importer.get_zone_name_to_id()
+def test_matches_published_prices(gme_day, hour):
+    real = gme_day.real_prices[hour]
+    solution = build_and_solve(gme_day.hours[hour])
 
-    build_and_solve(data, solver_name="appsi_highs")
-
-    assert data.pun_price == pytest.approx(real["PUN"], abs=PUN_TOL)
+    assert solution.pun_price == pytest.approx(real["PUN"], abs=PUN_TOL)
     for zone in options.PUN_ZONES:
-        assert data.zonal_prices[zone_ids[zone]] == pytest.approx(real[zone], abs=ZONAL_TOL), zone
+        zeta = solution.zonal_prices[gme_day.zone_ids[zone]]
+        assert zeta == pytest.approx(real[zone], abs=ZONAL_TOL), zone

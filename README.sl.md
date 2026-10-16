@@ -62,12 +62,12 @@ pun-clearing --path data --date 20100504 --jobs 8 --quiet     # 8 ur hkrati
 Iz Pythona:
 
 ```python
-from pun_clearing.dataio.gme_importer import GMEImporter
+from pun_clearing.dataio.gme_importer import load_day
 from pun_clearing.model.pun_model import build_and_solve
 
-importer = GMEImporter(path="data", date="20100504")
-hour = build_and_solve(importer.get_hourly_data()[9])
-print(hour.pun_price, hour.zonal_prices)
+day = load_day("data", "20100504")
+solution = build_and_solve(day.hours[9])
+print(solution.pun_price, solution.zonal_prices)
 ```
 
 Za eno uro v obliki JSON (PUN iz modela, objavljeni PUN, ob market splitu pa še
@@ -100,7 +100,7 @@ Vse to se ob vsakem pushu samodejno požene tudi na GitHub Actions
 ├── results/                    # shranjeni urni rezultati za notebook
 ├── src/pun_clearing/
 │   ├── conf/options.py         # solver, big-M, parametri binary expansion
-│   ├── model/data_classes.py   # Bid, Zone, Line, HourlyData — podatkovni razredi
+│   ├── model/data_classes.py   # Order, Zone, HourlyData (vhod), Solution (rezultat)
 │   ├── model/pun_model.py      # jedro: zgradi in reši MILP
 │   ├── dataio/gme_importer.py  # branje XML datotek GME
 │   └── run_hourly.py           # CLI (`pun-clearing`): izračun ur in primerjava z GME

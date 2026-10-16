@@ -63,12 +63,12 @@ pun-clearing --path data --date 20100504 --jobs 8 --quiet     # 8 hours in paral
 Or from Python:
 
 ```python
-from pun_clearing.dataio.gme_importer import GMEImporter
+from pun_clearing.dataio.gme_importer import load_day
 from pun_clearing.model.pun_model import build_and_solve
 
-importer = GMEImporter(path="data", date="20100504")
-hour = build_and_solve(importer.get_hourly_data()[9])
-print(hour.pun_price, hour.zonal_prices)
+day = load_day("data", "20100504")
+solution = build_and_solve(day.hours[9])
+print(solution.pun_price, solution.zonal_prices)
 ```
 
 A single hour as JSON (model PUN, published PUN and, if the market split,
@@ -100,7 +100,7 @@ The same checks run on GitHub Actions (`.github/workflows/ci.yml`).
 ├── results/                    # cached hourly results used by the notebook
 ├── src/pun_clearing/
 │   ├── conf/options.py         # solver config, big-M, binary expansion params
-│   ├── model/data_classes.py   # Bid, Zone, Line, HourlyData — plain containers
+│   ├── model/data_classes.py   # Order, Zone, HourlyData (input), Solution (output)
 │   ├── model/pun_model.py      # THE CORE: builds and solves the Savelli 2017 MILP
 │   ├── dataio/gme_importer.py  # reads GME XML files into data classes
 │   └── run_hourly.py           # CLI (`pun-clearing`): solve hours, compare with GME

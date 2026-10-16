@@ -37,6 +37,7 @@ Constraint comments cite [Paper eq X] (Savelli 2017, Appendix A) and
 """
 
 import logging
+import time
 from collections import defaultdict
 
 from pyomo.environ import (
@@ -45,20 +46,18 @@ from pyomo.environ import (
 )
 
 from pun_clearing.conf import options
-from pun_clearing.model.data_classes import HourlyData
+from pun_clearing.model.data_classes import Acceptance, HourlyData, Order, Solution
 
 logger = logging.getLogger(__name__)
 
 
-def build_and_solve(data: HourlyData, solver_name: str | None = None,
-                    verbose: bool | None = None) -> HourlyData:
-    """Build and solve the MILP for one hour; results are written into `data`."""
+def build_and_solve(data: HourlyData, solver: str = options.SOLVER_NAME,
+                    verbose: bool = False, threads: int | None = None) -> Solution:
+    """Build and solve the MILP for one hour."""
+    t0 = time.perf_counter()
     model = build_model(data)
-    results = solve_model(model, solver_name or options.SOLVER_NAME,
-                          options.VERBOSE if verbose is None else verbose)
-    extract_solution(model, data)
-    data.solver_status = str(results.solver.termination_condition)
-    return data
+    status = solve_model(model, solver, verbose, threads)
+    return extract_solution(model, data, status, time.perf_counter() - t0)
 
 
 # ========================================================================
@@ -96,18 +95,12 @@ def _add_sets_and_params(m: ConcreteModel, data: HourlyData) -> None:
     m.Zpi = Set(initialize=[z for z, zone in data.zones.items() if zone.is_pun])
     m.B = RangeSet(0, options.BINARY_EXP_BITS - 1)       # bits j
 
-    # PUN bids at the maximum price are always in the money (Paper Sec. III):
-    # their binaries are fixed and most constraints are only written for the rest.
-    m.K_free = Set(initialize=[k for k in m.K if pun[k].price < options.MAX_PRICE])
+    # PUN bids at the maximum price are always in the money (Paper Sec. III). They are
+    # handled once, in _fix_max_price_bids; all other constraints run over K_free.
+    m.K_fixed = Set(initialize=[k for k in m.K if pun[k].price >= options.MAX_PRICE])
+    m.K_free = Set(initialize=[k for k in m.K if k not in m.K_fixed])
 
-    t = data.period
-    flow_cap = {(i, j): 0.0 for i in m.Z for j in m.Z}
-    for line in data.lines:
-        if t in line.capacity:
-            flow_cap[line.from_zone_id, line.to_zone_id] = line.capacity[t]
-        if t in line.capacity_rev:
-            flow_cap[line.to_zone_id, line.from_zone_id] = line.capacity_rev[t]
-    m.Fmax = Param(m.Z, m.Z, initialize=flow_cap, default=0.0)
+    m.Fmax = Param(m.Z, m.Z, initialize=data.flow_limits, default=0.0)
 
 
 def _add_variables(m: ConcreteModel) -> None:
@@ -141,14 +134,20 @@ def _add_variables(m: ConcreteModel) -> None:
 
 
 def _fix_max_price_bids(m: ConcreteModel, data: HourlyData) -> None:
-    """[Paper Sec. III] Bids at the maximum price are always fully executed."""
-    for k, bid in enumerate(data.pun_bids):
-        if bid.price >= options.MAX_PRICE:
-            m.ug[k].fix(1)
-            m.ue[k].fix(0)
-            m.dwk[k].fix(0)
-            m.ddk[k].fix(0)
-            m.dkpi[k].fix(bid.volume)
+    """[Paper Sec. III] Bids at the maximum price are always fully executed.
+
+    With ug fixed to 1, the linearised products reduce to y_gpi = π and y_gzeta = ζ.
+    """
+    pun = data.pun_bids
+    for k in m.K_fixed:
+        m.ug[k].fix(1)
+        m.ue[k].fix(0)
+        m.dwk[k].fix(0)
+        m.ddk[k].fix(0)
+        m.dkpi[k].fix(pun[k].volume)
+    m.c_fixed_ygpi = Constraint(m.K_fixed, rule=lambda m, k: m.y_gpi[k] == m.pi)
+    m.c_fixed_ygz = Constraint(
+        m.K_fixed, rule=lambda m, k: m.y_gzeta[k] == m.zeta[pun[k].zone_id])
 
 
 def _add_objective(m: ConcreteModel, data: HourlyData) -> None:
@@ -187,15 +186,14 @@ def _add_upper_level(m: ConcreteModel, data: HourlyData) -> None:
 
     # [Paper eq 38 / openDAM L278-294] merit order: ug_h ≥ ug_k for consecutive m_h < m_k
     by_merit = sorted(m.K, key=lambda k: pun[k].merit_order)
-    merit_pairs = [(h, k) for h, k in zip(by_merit, by_merit[1:])
-                   if pun[h].price < options.MAX_PRICE]
+    merit_pairs = [(h, k) for h, k in zip(by_merit, by_merit[1:]) if h not in m.K_fixed]
     m.mo_set = Set(initialize=range(len(merit_pairs)))
     m.c_merit = Constraint(
         m.mo_set, rule=lambda m, n: m.ug[merit_pairs[n][0]] >= m.ug[merit_pairs[n][1]])
 
     # [Paper eq 39 / openDAM L302-329] price order: ue_k ≤ ug_h − ug_k, where k is
     # the first bid (in descending price order) with a strictly lower price than h
-    price_pairs = _next_lower_price_pairs(data)
+    price_pairs = _next_lower_price_pairs(pun, fixed=set(m.K_fixed))
     m.po_set = Set(initialize=range(len(price_pairs)))
     m.c_price_order = Constraint(
         m.po_set,
@@ -203,13 +201,12 @@ def _add_upper_level(m: ConcreteModel, data: HourlyData) -> None:
         <= m.ug[price_pairs[n][0]] - m.ug[price_pairs[n][1]])
 
 
-def _next_lower_price_pairs(data: HourlyData) -> list[tuple[int, int]]:
-    """Pairs (h, k) where k is the next PUN bid below h in descending price order."""
-    pun = data.pun_bids
+def _next_lower_price_pairs(pun: list, fixed: set[int]) -> list[tuple[int, int]]:
+    """Pairs (h, k), h not fixed, where k is the next PUN bid below h in price order."""
     by_price = sorted(range(len(pun)), key=lambda k: -pun[k].price)
     pairs = []
     for pos, h in enumerate(by_price):
-        if pun[h].price >= options.MAX_PRICE:
+        if h in fixed:
             continue
         k = next((k for k in by_price[pos + 1:] if pun[k].price < pun[h].price), None)
         if k is not None:
@@ -317,25 +314,16 @@ def _add_linearizations(m: ConcreteModel, data: HourlyData) -> None:
     # y_gpi = ug·π  [Paper eq 58-59 / openDAM L789-822]
     m.c_ygpi_lb = Constraint(m.K_free, rule=lambda m, k: -M * m.ug[k] <= m.y_gpi[k])
     m.c_ygpi_ub = Constraint(m.K_free, rule=lambda m, k: m.y_gpi[k] <= M * m.ug[k])
-
-    def ygpi_llb(m, k):
-        if k not in m.K_free:
-            return m.y_gpi[k] == m.pi            # ug fixed to 1 → y_gpi = π
-        return -M * (1 - m.ug[k]) <= m.pi - m.y_gpi[k]
-    m.c_ygpi_llb = Constraint(m.K, rule=ygpi_llb)
+    m.c_ygpi_llb = Constraint(
+        m.K_free, rule=lambda m, k: -M * (1 - m.ug[k]) <= m.pi - m.y_gpi[k])
     m.c_ygpi_lub = Constraint(
         m.K_free, rule=lambda m, k: m.pi - m.y_gpi[k] <= M * (1 - m.ug[k]))
 
     # y_gzeta = ug·ζ  [Paper eq 60-61 / openDAM L824-857]
     m.c_ygz_lb = Constraint(m.K_free, rule=lambda m, k: -M * m.ug[k] <= m.y_gzeta[k])
     m.c_ygz_ub = Constraint(m.K_free, rule=lambda m, k: m.y_gzeta[k] <= M * m.ug[k])
-
-    def ygz_llb(m, k):
-        zeta = m.zeta[pun[k].zone_id]
-        if k not in m.K_free:
-            return m.y_gzeta[k] == zeta          # ug fixed to 1 → y_gzeta = ζ
-        return -M * (1 - m.ug[k]) <= zeta - m.y_gzeta[k]
-    m.c_ygz_llb = Constraint(m.K, rule=ygz_llb)
+    m.c_ygz_llb = Constraint(
+        m.K_free, rule=lambda m, k: -M * (1 - m.ug[k]) <= m.zeta[pun[k].zone_id] - m.y_gzeta[k])
     m.c_ygz_lub = Constraint(
         m.K_free, rule=lambda m, k: m.zeta[pun[k].zone_id] - m.y_gzeta[k] <= M * (1 - m.ug[k]))
 
@@ -372,26 +360,16 @@ def _indices_by_zone(bids) -> defaultdict[int, list[int]]:
 #  SOLVER
 # ========================================================================
 
-def solve_model(model: ConcreteModel, solver_name: str, verbose: bool = False):
+def solve_model(model: ConcreteModel, solver_name: str = options.SOLVER_NAME,
+                verbose: bool = False, threads: int | None = None) -> str:
+    """Solve the model in place and return the termination condition."""
     solver = SolverFactory(solver_name)
-    if solver is None:
-        raise RuntimeError(f"Solver '{solver_name}' not available.")
-
-    if solver_name == 'cplex':
-        solver.options["timelimit"] = options.SOLVER_TIME_LIMIT
-        solver.options["mip tolerances mipgap"] = options.MIP_GAP
-        solver.options["mip tolerances integrality"] = 0
-        solver.options["simplex tolerances optimality"] = 1e-9
-        solver.options["simplex tolerances feasibility"] = 1e-9
-    elif solver_name == 'gurobi':
-        solver.options["TimeLimit"] = options.SOLVER_TIME_LIMIT
-        solver.options["MIPGap"] = options.MIP_GAP
-    elif solver_name in ('appsi_highs', 'highs'):
-        solver.options["time_limit"] = float(options.SOLVER_TIME_LIMIT)
-        solver.options["mip_rel_gap"] = float(options.MIP_GAP)
-        solver.options["output_flag"] = verbose
-        for key, val in options.HIGHS_OPTIONS.items():
-            solver.options[key] = val
+    if not solver.available(exception_flag=False):
+        raise RuntimeError(f"Solver '{solver_name}' is not available.")
+    for key, val in options.SOLVER_OPTIONS.get(solver_name, {}).items():
+        solver.options[key] = val
+    if threads is not None:
+        solver.options["threads"] = threads
 
     results = solver.solve(model, tee=verbose)
 
@@ -400,27 +378,31 @@ def solve_model(model: ConcreteModel, solver_name: str, verbose: bool = False):
         raise RuntimeError("Model is infeasible!")
     if condition != TerminationCondition.optimal:
         logger.warning(f"Solver: {condition}")
-    return results
+    return str(condition)
 
 
 # ========================================================================
 #  SOLUTION EXTRACTION
 # ========================================================================
 
-def extract_solution(model: ConcreteModel, data: HourlyData) -> None:
-    data.pun_price = value(model.pi)
-    data.zonal_prices = {z: value(model.zeta[z]) for z in model.Z}
-    data.social_welfare = value(model.obj)
+def extract_solution(model: ConcreteModel, data: HourlyData, status: str,
+                     solve_time_s: float) -> Solution:
+    def shares(orders: list[Order], executed) -> list[float]:
+        return [value(executed[i]) / o.volume if o.volume > 0 else 0.0
+                for i, o in enumerate(orders)]
 
-    def acceptance(executed, volume):
-        return executed / volume if volume > 0 else 0
-
-    for p, supply in enumerate(data.supply_bids):
-        supply.acceptance = acceptance(value(model.sp[p]), supply.volume)
-    for k, demand in enumerate(data.demand_bids):
-        demand.acceptance = acceptance(value(model.dk[k]), demand.volume)
-    for k, pun in enumerate(data.pun_bids):
-        pun.acceptance = acceptance(value(model.dkpi[k]), pun.volume)
-
-    logger.info(f"Hour {data.period}: PUN = {data.pun_price:.6f} €/MWh, "
-                f"welfare = {data.social_welfare:.2f}")
+    solution = Solution(
+        pun_price=value(model.pi),
+        zonal_prices={z: value(model.zeta[z]) for z in model.Z},
+        social_welfare=value(model.obj),
+        status=status,
+        acceptance=Acceptance(
+            supply=shares(data.supply_bids, model.sp),
+            demand=shares(data.demand_bids, model.dk),
+            pun=shares(list(data.pun_bids), model.dkpi),
+        ),
+        solve_time_s=solve_time_s,
+    )
+    logger.info(f"Hour {data.period}: PUN = {solution.pun_price:.6f} €/MWh, "
+                f"welfare = {solution.social_welfare:.2f}")
+    return solution
